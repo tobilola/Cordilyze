@@ -13,6 +13,7 @@ import requests
 from src.database import CardioAIDB
 from src.pdf_parser import LabReportParser
 from visualizations import *
+from shap_explainer import explain_prediction, create_shap_waterfall, create_shap_bar, create_shap_comparison
 
 # Page config
 st.set_page_config(
@@ -326,7 +327,7 @@ if 'achievements' not in st.session_state:
 if 'first_visit' not in st.session_state:
     st.session_state.first_visit = True
 if 'anthropic_api_key' not in st.session_state:
-    st.session_state.anthropic_api_key = ''
+    st.session_state.anthropic_api_key = os.environ.get('ANTHROPIC_API_KEY', '')
 
 # Smart AI Responses Database (No API needed!)
 AI_RESPONSES = {
@@ -1300,24 +1301,37 @@ if st.session_state.user_type == 'patient':
                 fig = create_risk_gauge(risk_score)
                 st.plotly_chart(fig, use_container_width=True)
                 
-                # Risk factor radar + feature importance side by side
+                # Risk factor analysis — SHAP explanations
                 st.markdown("### 🔍 What's Driving Your Risk?")
-                viz_col1, viz_col2 = st.columns(2)
-                with viz_col1:
+
+                patient_features = np.array([[
+                    assessment_data['age'], assessment_data['sex'],
+                    assessment_data['cholesterol_total'], assessment_data['cholesterol_hdl'],
+                    assessment_data['cholesterol_ldl'], assessment_data['triglycerides'],
+                    assessment_data['blood_pressure_systolic'], assessment_data['blood_pressure_diastolic'],
+                    assessment_data['glucose'], assessment_data['bmi'],
+                    assessment_data['smoking'], assessment_data['physical_activity']
+                ]])
+
+                if xgb_model is not None:
+                    explanation = explain_prediction(xgb_model, patient_features)
+                    st.session_state['last_explanation'] = explanation
+
+                    viz_col1, viz_col2 = st.columns(2)
+                    with viz_col1:
+                        waterfall_fig = create_shap_waterfall(explanation, risk_score)
+                        st.plotly_chart(waterfall_fig, use_container_width=True)
+                    with viz_col2:
+                        bar_fig = create_shap_bar(explanation)
+                        st.plotly_chart(bar_fig, use_container_width=True)
+
+                    top3 = explanation['top_drivers'][:3]
+                    st.markdown("**Your top risk drivers:**")
+                    for i, (feature, pct) in enumerate(top3, 1):
+                        st.markdown(f"{i}. **{feature}** — contributes {pct:.1f}% of your overall risk")
+                else:
                     radar_fig = create_risk_factor_radar(assessment_data)
                     st.plotly_chart(radar_fig, use_container_width=True)
-                with viz_col2:
-                    # Calculate approximate feature contributions
-                    contributions = {}
-                    contributions['Cholesterol'] = min(35, max(5, (total_chol - 150) / 5))
-                    contributions['Blood Pressure'] = min(30, max(5, (bp_sys - 110) / 3))
-                    contributions['BMI'] = min(25, max(5, (bmi - 20) * 2))
-                    contributions['Glucose'] = min(25, max(5, (glucose - 80) / 2))
-                    contributions['Smoking'] = 25 if assessment_data['smoking'] == 1 else 2
-                    contributions['Inactivity'] = [20, 10, 2][assessment_data['physical_activity']]
-                    contributions['Age'] = min(20, max(3, (age - 30) * 0.5))
-                    fi_fig = create_feature_importance_chart(contributions)
-                    st.plotly_chart(fi_fig, use_container_width=True)
                 
                 # Timeline projection
                 st.markdown("### ⏳ Your Risk Projection Over Time")
@@ -1535,6 +1549,41 @@ if st.session_state.user_type == 'patient':
                 for change in changes:
                     st.markdown(change)
                 
+                # SHAP comparison — what changed and why
+                if xgb_model is not None:
+                    st.markdown("### 🔬 Why Your Risk Changed (AI Explanation)")
+
+                    baseline_features = np.array([[
+                        baseline['age'], baseline['sex'],
+                        baseline['cholesterol_total'], baseline['cholesterol_hdl'],
+                        baseline['cholesterol_ldl'], baseline['triglycerides'],
+                        baseline['blood_pressure_systolic'], baseline['blood_pressure_diastolic'],
+                        baseline['glucose'], baseline['bmi'],
+                        baseline['smoking'], baseline['physical_activity']
+                    ]])
+
+                    new_features = np.array([[
+                        new_data['age'], new_data['sex'],
+                        new_data['cholesterol_total'], new_data['cholesterol_hdl'],
+                        new_data['cholesterol_ldl'], new_data['triglycerides'],
+                        new_data['blood_pressure_systolic'], new_data['blood_pressure_diastolic'],
+                        new_data['glucose'], new_data['bmi'],
+                        new_data['smoking'], new_data['physical_activity']
+                    ]])
+
+                    exp_before = explain_prediction(xgb_model, baseline_features)
+                    exp_after = explain_prediction(xgb_model, new_features)
+
+                    comparison_fig = create_shap_comparison(exp_before, exp_after)
+                    st.plotly_chart(comparison_fig, use_container_width=True)
+
+                    st.markdown("""
+                    <div class="info-box">
+                    <p><strong>Powered by SHAP</strong> (SHapley Additive exPlanations) —
+                    the standard for AI explainability used in clinical and financial AI systems.</p>
+                    </div>
+                    """, unsafe_allow_html=True)
+
                 # Show projection timeline
                 st.markdown("### ⏳ Your Risk Trajectory: With vs Without These Changes")
                 age = baseline.get('age', 50)
